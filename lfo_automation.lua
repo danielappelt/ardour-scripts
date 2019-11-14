@@ -1,6 +1,7 @@
 ardour {
    ["type"]    = "EditorAction",
-   name        = "LFO automation",
+   name        = "Add LFO automation to region",
+   version     = "0.1.1",
    license     = "MIT",
    author      = "Daniel Appelt",
    description = [[Add LFO-like plugin automation to selected region]]
@@ -18,7 +19,8 @@ function factory (unused_params)
 
       -- Bail out if no region was selected
       if region == nil then
-         LuaDialog.Message("LFO Automation", "Please first select a region", LuaDialog.MessageType.Info, LuaDialog.ButtonType.Close):run()
+         LuaDialog.Message("Add LFO automation to region", "Please select a region first!",
+                           LuaDialog.MessageType.Info, LuaDialog.ButtonType.Close):run()
          return
       end
 
@@ -30,38 +32,38 @@ function factory (unused_params)
          end
       end
 
-      -- Get a list of all available plugin parameters on the track. For the original code
+      -- Get a list of all available plugin parameters on the track. This looks ugly. For the original code
       -- see https://github.com/Ardour/ardour/blob/master/scripts/midi_cc_to_automation.lua
       local targets = {}
       local i = 0
       while true do -- iterate over all plugins on the route
-         local proc = track:nth_plugin(i)
-         if proc:isnil() then break end
-         -- print(proc:display_name())
-         local plug = proc:to_insert():plugin(0) -- we know it's a plugin-insert (we asked for nth_plugin)
-         local n = 0 -- count control-ports
-         for j = 0, plug:parameter_count() - 1 do -- iterate over all plugin parameters
+         if track:nth_plugin(i):isnil() then break end
+
+         local proc = track:nth_plugin(i) -- ARDOUR.LuaAPI.plugin_automation() expects a proc not a plugin
+         local plug = proc:to_insert():plugin(0)
+         local plug_label = i .. ": " .. plug:name() -- Handle ambiguity if there are multiple plugin instances
+         local n = 0 -- Count control-ports separately. ARDOUR.LuaAPI.plugin_automation() only returns those.
+         for j = 0, plug:parameter_count() - 1 do -- Iterate over all parameters
             if plug:parameter_is_control(j) then
                local label = plug:parameter_label(j)
-               -- print(label)
                if plug:parameter_is_input(j) and label ~= "hidden" and label:sub(1,1) ~= "#" then
-                  local nn = n --local scope for return value function
-                  -- TODO handle ambiguity if there are 2 plugins with the same name on the same track
-                  -- we need 2 return values: the plugin-instance and the parameter-id, so we use a table (associative array)
-                  -- however, we cannot directly use a table: the dropdown menu would expand it as another sub-menu.
-                  -- so we produce a function that will return the table.
-                  targets[proc:display_name()] = targets[proc:display_name()] or {}
-                  targets[proc:display_name()][label] = function() return {["p"] = proc, ["n"] = nn} end
+                  -- We need two return values: the plugin-instance and the parameter-id. We use a function to
+                  -- return both values in order to avoid another sub-menu level in the dropdown.
+                  local nn = n -- local scope for return value function
+                  targets[plug_label] = targets[plug_label] or {}
+                  targets[plug_label][label] = function() return {["p"] = proc, ["n"] = nn} end
                end
                n = n + 1
             end
          end
+
          i = i + 1
       end
 
-      -- Bail out if there are no parameters
+      -- Bail out if there are no plugin parameters
       if next(targets) == nil then
-         LuaDialog.Message("LFO Automation", "No plugin parameters found", LuaDialog.MessageType.Info, LuaDialog.ButtonType.Close):run()
+         LuaDialog.Message("Add LFO automation to region", "No plugin parameters found.",
+                           LuaDialog.MessageType.Info, LuaDialog.ButtonType.Close):run()
          region, track, targets = nil, nil, nil
          collectgarbage()
          return
@@ -69,10 +71,11 @@ function factory (unused_params)
 
       -- Display dialog to select (plugin and) plugin parameter, and LFO cycle type + min / max
       local dialog_options = {
-         { type = "heading", title = "LFO automation", align = "left"},
+         { type = "heading", title = "Add LFO automation to region", align = "left"},
          { type = "dropdown", key = "param", title = "Plugin parameter", values = targets },
-         { type = "dropdown", key = "wave", title = "Waveform", values =
-              { ["Ramp up"] = 1, ["Ramp down"] = 2, ["Triangle"] = 3, ["Sine"] = 4, ["Exp up"] = 5, ["Exp down"] = 6, ["Log up"] = 7, ["Log down"] = 8 } },
+         { type = "dropdown", key = "wave", title = "Waveform", values = {
+              ["Ramp up"] = 1, ["Ramp down"] = 2, ["Triangle"] = 3, ["Sine"] = 4,
+              ["Exp up"] = 5, ["Exp down"] = 6, ["Log up"] = 7, ["Log down"] = 8 } },
          { type = "number", key = "cycles", title = "No. of cycles", min = 1, max = 16, step = 1, digits = 0 },
          { type = "slider", key = "min", title = "Minimum in %", min = 0, max = 100, digits = 1 },
          { type = "slider", key = "max", title = "Maximum in %", min = 0, max = 100, digits = 1, default = 100 }
@@ -98,7 +101,8 @@ function factory (unused_params)
       track, targets, rv, pd = nil, nil, nil, nil
       assert(not al:isnil())
 
-      -- Define lookup tables for our waves
+      -- Define lookup tables for our waves. Empty ones will be calculated in a separate step.
+      -- TODO: at this point we already know which one is needed, still we compute all.
       local lut = {
          { 0, 1 }, -- ramp up
          { 1, 0 }, -- ramp down
@@ -120,7 +124,7 @@ function factory (unused_params)
          -- log up
          lut[7][i+1] = -math.log(1 + (i / log_min - i) / 20) / math.log(log_min)
       end
-
+      -- "down" variants just need the values in reverse order
       for i = 21, 1, -1 do
          -- exp down
          lut[6][22-i] = lut[5][i]
@@ -129,7 +133,7 @@ function factory (unused_params)
       end
 
       -- Initialize undo
-      Session:begin_reversible_command("LFO automation")
+      Session:begin_reversible_command("Add LFO automation to region")
       local before = al:get_state() -- save previous state (for undo)
       al:clear_list() -- clear target automation-list
 
@@ -143,7 +147,7 @@ function factory (unused_params)
          for k, v in pairs(values) do
             local pos = cycle_start + (k - 1) * offset
             if k == 1 and v ~= last then
-               -- Move event one sample further
+               -- Move event one sample further. A larger offset might be needed to avoid unwanted effects.
                pos = pos + 1
             end
 
@@ -156,7 +160,10 @@ function factory (unused_params)
          end
       end
 
+      -- TODO: display the modified automation lane in the time line in order to make the change visible!
+
       -- Save undo
+      -- TODO: in Ardour 5.12 this does not lead to an actual entry in the undo list?!
       Session:add_command(al:memento_command(before, al:get_state()))
       Session:commit_reversible_command(nil)
 
